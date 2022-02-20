@@ -1,0 +1,122 @@
+include:
+  - template: Code-Quality.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/Container-Scanning.gitlab-ci.yml
+
+image: docker:20.10.12
+
+variables:
+  # When using dind service, you must instruct Docker to talk with
+  # the daemon started inside of the service. The daemon is available
+  # with a network connection instead of the default
+  # /var/run/docker.sock socket.
+  DOCKER_HOST: tcp://docker:2376
+  #
+  # The 'docker' hostname is the alias of the service container as described at
+  # https://docs.gitlab.com/ee/ci/services/#accessing-the-services.
+  # If you're using GitLab Runner 12.7 or earlier with the Kubernetes executor and Kubernetes 1.6 or earlier,
+  # the variable must be set to tcp://localhost:2376 because of how the
+  # Kubernetes executor connects services to the job container
+  # DOCKER_HOST: tcp://localhost:2376
+  #
+  # Specify to Docker where to create the certificates. Docker
+  # creates them automatically on boot, and creates
+  # `/certs/client` to share between the service and job
+  # container, thanks to volume mount from config.toml
+  DOCKER_TLS_CERTDIR: "/certs"
+  # These are usually specified by the entrypoint, however the
+  # Kubernetes executor doesn't run entrypoints
+  # https://gitlab.com/gitlab-org/gitlab-runner/-/issues/4125
+  DOCKER_TLS_VERIFY: 1
+  DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+
+  # Enable k8s manifest scanning
+  SCAN_KUBERNETES_MANIFESTS: "true"
+
+services:
+  - docker:20.10.12-dind
+
+stages:
+  - build
+  - test
+  - scan
+  - deploy
+
+before_script:
+  - docker info
+
+build:
+  stage: build
+  script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker build -t $CI_REGISTRY_IMAGE/express/web:$CI_COMMIT_SHA .
+    - docker push $CI_REGISTRY_IMAGE/express/web:$CI_COMMIT_SHA
+
+# Unit Tests
+test:
+  stage: test
+  script:
+    - npm install
+    - npx nyc --reporter cobertura mocha
+  artifacts:
+    reports:
+      cobertura: coverage/cobertura-coverage.xml
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"' # Run the job in merge request pipelines
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'      # Run the job in pipelines on the default branch (but not in other branch pipelines)
+    - if: '$CI_COMMIT_TAG'                               # Run the job in pipelines for tags
+
+# Code Quality
+code_quality:
+  variables:
+    REPORT_FORMAT: html
+  artifacts:
+    paths: [gl-code-quality-report.html]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"' # Run the job in merge request pipelines
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'      # Run the job in pipelines on the default branch (but not in other branch pipelines)
+    - if: '$CI_COMMIT_TAG'                               # Run the job in pipelines for tags
+
+# Dependency-Scanning
+dependency_scanning:
+  stage: scan
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"' # Run the job in merge request pipelines
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'      # Run the job in pipelines on the default branch (but not in other branch pipelines)
+    - if: '$CI_COMMIT_TAG'                               # Run the job in pipelines for tags
+
+# SAST
+sast:
+  stage: scan
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"' # Run the job in merge request pipelines
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'      # Run the job in pipelines on the default branch (but not in other branch pipelines)
+    - if: '$CI_COMMIT_TAG'                               # Run the job in pipelines for tags
+
+# Secret-Detection
+secret_detection:
+  stage: scan
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"' # Run the job in merge request pipelines
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'      # Run the job in pipelines on the default branch (but not in other branch pipelines)
+    - if: '$CI_COMMIT_TAG'                               # Run the job in pipelines for tags
+
+# Container Scanning
+container_scanning:
+  stage: scan
+  variables:
+    CS_DEFAULT_BRANCH_IMAGE: $CI_REGISTRY_IMAGE/express/web:$CI_COMMIT_SHA
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"' # Run the job in merge request pipelines
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'      # Run the job in pipelines on the default branch (but not in other branch pipelines)
+    - if: '$CI_COMMIT_TAG'                               # Run the job in pipelines for tags
+
+# Deploy via helmfiles
+deploy:
+  stage: deploy
+  script:
+    - kubectl config use-context $KUBE_CONTEXT
+  rules:
+    - if: '$CI_COMMIT_TAG'                               # Run the job in pipelines for tags
